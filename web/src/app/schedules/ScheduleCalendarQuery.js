@@ -5,7 +5,7 @@ import ScheduleCalendar from './ScheduleCalendar'
 import { urlParamSelector } from '../selectors'
 import { connect } from 'react-redux'
 import withWidth, { isWidthDown } from '@material-ui/core/withWidth/index'
-import { getStartOfWeek } from '../util/luxon-helpers'
+import { getStartOfWeek, getEndOfWeek } from '../util/luxon-helpers'
 import { DateTime } from 'luxon'
 
 const query = gql`
@@ -38,9 +38,9 @@ const mapStateToProps = (state) => {
       ? getStartOfWeek().toUTC().toISO()
       : DateTime.local().startOf('month').toUTC().toISO(),
   )
-
-  const unitToAdd = weekly ? { weeks: 1 } : { months: 1 }
-  const end = DateTime.fromISO(start).plus(unitToAdd).toUTC().toISO()
+  const end = weekly
+    ? getEndOfWeek(DateTime.fromISO(start))
+    : DateTime.fromISO(start).endOf('month').toUTC().toISO()
 
   return {
     start,
