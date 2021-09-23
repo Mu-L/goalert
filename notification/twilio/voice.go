@@ -22,6 +22,7 @@ import (
 	"github.com/target/goalert/retry"
 	"github.com/target/goalert/util/errutil"
 	"github.com/target/goalert/util/log"
+	"github.com/ttacon/libphonenumber"
 )
 
 // CallType indicates a supported Twilio voice call type.
@@ -61,14 +62,14 @@ var pRx = regexp.MustCompile(`\((.*?)\)`)
 
 // Voice implements a notification.Sender for Twilio voice calls.
 type Voice struct {
-	c   *Config
-	r   notification.Receiver
-	ban *dbBan
+	c *Config
+	r notification.Receiver
 }
 
 var _ notification.ReceiverSetter = &Voice{}
 var _ notification.Sender = &Voice{}
 var _ notification.StatusChecker = &Voice{}
+var _ notification.FriendlyValuer = &Voice{}
 
 type gather struct {
 	XMLName   xml.Name `xml:"Gather,omitempty"`
@@ -142,12 +143,6 @@ func NewVoice(ctx context.Context, db *sql.DB, c *Config) (*Voice, error) {
 		c: c,
 	}
 
-	var err error
-	v.ban, err = newBanDB(ctx, db, c, "twilio_voice_errors")
-	if err != nil {
-		return nil, errors.Wrap(err, "init voice ban DB")
-	}
-
 	return v, nil
 }
 
@@ -199,27 +194,20 @@ func spellNumber(n int) string {
 }
 
 // Send implements the notification.Sender interface.
-func (v *Voice) Send(ctx context.Context, msg notification.Message) (string, *notification.Status, error) {
+func (v *Voice) Send(ctx context.Context, msg notification.Message) (*notification.SentMessage, error) {
 	cfg := config.FromContext(ctx)
 	if !cfg.Twilio.Enable {
-		return "", nil, errors.New("Twilio provider is disabled")
+		return nil, errors.New("Twilio provider is disabled")
 	}
 	toNumber := msg.Destination().Value
 
 	if toNumber == cfg.Twilio.FromNumber {
-		return "", nil, errors.New("refusing to make outgoing call to FromNumber")
+		return nil, errors.New("refusing to make outgoing call to FromNumber")
 	}
 	ctx = log.WithFields(ctx, log.Fields{
 		"Number": toNumber,
 		"Type":   "TwilioVoice",
 	})
-	b, err := v.ban.IsBanned(ctx, toNumber, true)
-	if err != nil {
-		return "", nil, errors.Wrap(err, "check ban status")
-	}
-	if b {
-		return "", nil, errors.New("number had too many outgoing errors recently")
-	}
 
 	opts := &VoiceOptions{
 		ValidityPeriod: time.Second * 10,
@@ -230,29 +218,32 @@ func (v *Voice) Send(ctx context.Context, msg notification.Message) (string, *no
 	subID := -1
 	switch t := msg.(type) {
 	case notification.AlertBundle:
-		message = fmt.Sprintf("Service '%s' has %d unacknowledged alerts.", t.ServiceName, t.Count)
+		message = fmt.Sprintf("%s Service '%s' has %d unacknowledged alerts.", cfg.ApplicationName(), t.ServiceName, t.Count)
 		opts.Params.Set(msgParamBundle, "1")
 		opts.CallType = CallTypeAlert
 	case notification.Alert:
-		message = t.Summary
+		if t.Summary == "" {
+			t.Summary = "No summary provided"
+		}
+		message = fmt.Sprintf("%s alert: %s.", cfg.ApplicationName(), t.Summary)
 		opts.CallType = CallTypeAlert
 		subID = t.AlertID
 	case notification.AlertStatus:
 		message = rmParen.ReplaceAllString(t.LogEntry, "")
+		message = fmt.Sprintf("%s update: %s", cfg.ApplicationName(), message)
 		opts.CallType = CallTypeAlertStatus
 		subID = t.AlertID
 	case notification.Test:
-		message = "This is a test message from GoAlert."
+		message = fmt.Sprintf("This is a test message from %s.", cfg.ApplicationName())
 		opts.CallType = CallTypeTest
 	case notification.Verification:
-		message = "This is a message from GoAlert to verify your voice contact method. Your verification code is: " + spellNumber(t.Code) + ". Again, your verification code is: " + spellNumber(t.Code)
+		message = fmt.Sprintf(
+			"This is a message from %s to verify your voice contact method. Your verification code is: %s. Again, your verification code is: %s.",
+			cfg.ApplicationName(), spellNumber(t.Code), spellNumber(t.Code),
+		)
 		opts.CallType = CallTypeVerify
 	default:
-		return "", nil, errors.Errorf("unhandled message type: %T", t)
-	}
-
-	if message == "" {
-		message = "No summary provided."
+		return nil, errors.Errorf("unhandled message type: %T", t)
 	}
 
 	opts.Params.Set(msgParamSubID, strconv.Itoa(subID))
@@ -264,10 +255,10 @@ func (v *Voice) Send(ctx context.Context, msg notification.Message) (string, *no
 	voiceResponse, err := v.c.StartVoice(ctx, toNumber, opts)
 	if err != nil {
 		log.Log(ctx, errors.Wrap(err, "call user"))
-		return "", nil, err
+		return nil, err
 	}
 
-	return voiceResponse.SID, voiceResponse.messageStatus(), nil
+	return voiceResponse.sentMessage(), nil
 }
 
 func disabled(w http.ResponseWriter, req *http.Request) bool {
@@ -311,6 +302,7 @@ func (v *Voice) ServeStatusCallback(w http.ResponseWriter, req *http.Request) {
 		SID:    sid,
 		Status: status,
 		To:     number,
+		From:   req.FormValue("From"),
 	}
 	seq, err := strconv.Atoi(req.FormValue("SequenceNumber"))
 	if err == nil {
@@ -323,15 +315,6 @@ func (v *Voice) ServeStatusCallback(w http.ResponseWriter, req *http.Request) {
 		log.Log(ctx, err)
 	}
 
-	// Only update current call we are on, except for failed call
-	if status != CallStatusFailed {
-		return
-	}
-
-	err = v.ban.RecordError(context.Background(), number, true, "send failed")
-	if err != nil {
-		log.Log(ctx, errors.Wrap(err, "record error"))
-	}
 }
 
 type call struct {
@@ -490,12 +473,6 @@ func (v *Voice) getCall(w http.ResponseWriter, req *http.Request) (context.Conte
 		if err == nil {
 			return false
 		}
-		if userErr {
-			rerr := v.ban.RecordError(context.Background(), phoneNumber, isOutbound, msg)
-			if rerr != nil {
-				log.Log(ctx, errors.Wrap(rerr, "record error"))
-			}
-		}
 
 		// always log the failure
 		log.Log(ctx, err)
@@ -652,13 +629,7 @@ func (v *Voice) ServeAlert(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	var err error
 	if !call.Outbound {
-		// v.serveVoiceUI(w, req)
-		err = v.ban.RecordError(context.Background(), call.Number, false, "incoming calls not supported")
-		if err != nil {
-			log.Log(ctx, errors.Wrap(err, "record error"))
-		}
 		renderXML(w, req, twiMLEnd{
 			Say: "Please login to the dashboard to manage alerts. Goodbye.",
 		})
@@ -737,4 +708,13 @@ func (v *Voice) ServeAlert(w http.ResponseWriter, req *http.Request) {
 		})
 		return
 	}
+}
+
+// FriendlyValue will return the international formatting of the phone number.
+func (v *Voice) FriendlyValue(ctx context.Context, value string) (string, error) {
+	num, err := libphonenumber.Parse(value, "")
+	if err != nil {
+		return "", fmt.Errorf("parse number for formatting: %w", err)
+	}
+	return libphonenumber.Format(num, libphonenumber.INTERNATIONAL), nil
 }

@@ -7,16 +7,15 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	alertlog "github.com/target/goalert/alert/log"
 	"github.com/target/goalert/app/lifecycle"
 	"github.com/target/goalert/config"
 	"github.com/target/goalert/engine/processinglock"
 	"github.com/target/goalert/lock"
 	"github.com/target/goalert/notification"
-	"github.com/target/goalert/notificationchannel"
 	"github.com/target/goalert/permission"
 	"github.com/target/goalert/retry"
-	"github.com/target/goalert/user/contactmethod"
 	"github.com/target/goalert/util"
 	"github.com/target/goalert/util/log"
 	"github.com/target/goalert/util/sqlutil"
@@ -60,7 +59,8 @@ type DB struct {
 	advLock        *sql.Stmt
 	advLockCleanup *sql.Stmt
 
-	insertAlertBundle *sql.Stmt
+	createAlertBundle *sql.Stmt
+	bundleMessages    *sql.Stmt
 
 	deleteAny *sql.Stmt
 
@@ -72,7 +72,7 @@ type DB struct {
 func NewDB(ctx context.Context, db *sql.DB, a alertlog.Store, pausable lifecycle.Pausable) (*DB, error) {
 	lock, err := processinglock.NewLock(ctx, db, processinglock.Config{
 		Type:    processinglock.TypeMessage,
-		Version: 8,
+		Version: 9,
 	})
 	if err != nil {
 		return nil, err
@@ -112,7 +112,8 @@ func NewDB(ctx context.Context, db *sql.DB, a alertlog.Store, pausable lifecycle
 			fired_at = null,
 			provider_msg_id = coalesce($2, provider_msg_id),
 			provider_seq = CASE WHEN $3 = -1 THEN provider_seq ELSE $3 END,
-			next_retry_at = null
+			next_retry_at = null,
+			src_value = coalesce(src_value, $6)
 		where
 			(id = $1 or provider_msg_id = $2) and
 			(provider_seq <= $3 or $3 = -1) and
@@ -291,27 +292,28 @@ func NewDB(ctx context.Context, db *sql.DB, a alertlog.Store, pausable lifecycle
 			returning msg.id as msg_id, alert_id, msg.user_id, cm.id as cm_id
 		`),
 
-		insertAlertBundle: p.P(`
-			with new_msg as (
-				insert into outgoing_messages (
-					id,
-					created_at,
-					message_type,
-					contact_method_id,
-					channel_id,
-					user_id,
-					service_id
-				) values (
-					$1, $2, 'alert_notification_bundle', $3, $4, $5, $6
-				) returning (id)
+		createAlertBundle: p.P(`
+			insert into outgoing_messages (
+				id,
+				created_at,
+				message_type,
+				contact_method_id,
+				channel_id,
+				user_id,
+				service_id
+			) values (
+				$1, $2, 'alert_notification_bundle', $3, $4, $5, $6
 			)
+		`),
+
+		bundleMessages: p.P(`
 			update outgoing_messages
 			set
 				last_status = 'bundled',
 				last_status_at = now(),
-				status_details = (select id from new_msg),
+				status_details = $1,
 				cycle_id = null
-			where id = any($7::uuid[])
+			where id = any($2::uuid[])
 		`),
 
 		messages: p.P(`
@@ -360,15 +362,16 @@ func (db *DB) currentQueue(ctx context.Context, tx *sql.Tx, now time.Time) (*que
 	result := make([]Message, 0, len(db.sentMessages))
 	for rows.Next() {
 		var msg Message
-		var destID, destValue, verifyID, userID, serviceID, cmType, chanType, scheduleID sql.NullString
+		var destID, destValue, verifyID, userID, serviceID, scheduleID sql.NullString
+		var dstType notification.ScannableDestType
 		var alertID, logID sql.NullInt64
 		var statusAlertIDs sqlutil.IntArray
 		var createdAt, sentAt sql.NullTime
 		err = rows.Scan(
 			&msg.ID,
 			&msg.Type,
-			&cmType,
-			&chanType,
+			&dstType.CM,
+			&dstType.NC,
 			&destID,
 			&destValue,
 			&alertID,
@@ -395,16 +398,9 @@ func (db *DB) currentQueue(ctx context.Context, tx *sql.Tx, now time.Time) (*que
 		msg.Dest.Value = destValue.String
 		msg.StatusAlertIDs = statusAlertIDs
 		msg.ScheduleID = scheduleID.String
-		switch {
-		case cmType.String == string(contactmethod.TypeSMS):
-			msg.Dest.Type = notification.DestTypeSMS
-		case cmType.String == string(contactmethod.TypeVoice):
-			msg.Dest.Type = notification.DestTypeVoice
-		case chanType.String == string(notificationchannel.TypeSlack):
-			msg.Dest.Type = notification.DestTypeSlackChannel
-		case cmType.String == string(contactmethod.TypeEmail):
-			msg.Dest.Type = notification.DestTypeUserEmail
-		default:
+
+		msg.Dest.Type = dstType.DestType()
+		if msg.Dest.Type == notification.DestTypeUnknown {
 			log.Debugf(ctx, "unknown message type for message %s", msg.ID)
 			continue
 		}
@@ -444,8 +440,20 @@ func (db *DB) currentQueue(ctx context.Context, tx *sql.Tx, now time.Time) (*que
 		}
 	}
 
+	result, err = dedupAlerts(result, func(parentID string, duplicateIDs []string) error {
+		_, err = tx.StmtContext(ctx, db.bundleMessages).ExecContext(ctx, parentID, sqlutil.UUIDArray(duplicateIDs))
+		if err != nil {
+			return fmt.Errorf("bundle '%v' by pointing to '%s': %w", duplicateIDs, parentID, err)
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("dedup alerts: %w", err)
+	}
+
 	if cfg.General.MessageBundles {
-		result, err = bundleAlertMessages(result, func(msg Message, ids []string) error {
+		result, err = bundleAlertMessages(result, func(msg Message) (string, error) {
 			var cmID, chanID, userID sql.NullString
 			if msg.UserID != "" {
 				userID.Valid = true
@@ -458,7 +466,16 @@ func (db *DB) currentQueue(ctx context.Context, tx *sql.Tx, now time.Time) (*que
 				chanID.Valid = true
 				chanID.String = msg.Dest.ID
 			}
-			_, err := tx.StmtContext(ctx, db.insertAlertBundle).ExecContext(ctx, msg.ID, msg.CreatedAt, cmID, chanID, userID, msg.ServiceID, sqlutil.UUIDArray(ids))
+
+			newID := uuid.NewString()
+			_, err := tx.StmtContext(ctx, db.createAlertBundle).ExecContext(ctx, newID, msg.CreatedAt, cmID, chanID, userID, msg.ServiceID)
+			if err != nil {
+				return "", err
+			}
+
+			return newID, nil
+		}, func(parentID string, ids []string) error {
+			_, err = tx.StmtContext(ctx, db.bundleMessages).ExecContext(ctx, parentID, sqlutil.UUIDArray(ids))
 			return err
 		})
 		if err != nil {
@@ -513,7 +530,13 @@ func (db *DB) _UpdateMessageStatus(ctx context.Context, status *notification.Sen
 		s = StatusDelivered
 	}
 
-	_, err = db.updateStatus.ExecContext(ctx, cbID, status.ProviderMessageID, status.Sequence, s, status.Details)
+	var srcValue sql.NullString
+	if status.SrcValue != "" {
+		srcValue.Valid = true
+		srcValue.String = status.SrcValue
+	}
+
+	_, err = db.updateStatus.ExecContext(ctx, cbID, status.ProviderMessageID, status.Sequence, s, status.Details, srcValue)
 	return err
 }
 

@@ -23,18 +23,23 @@ function testTemporarySchedule(screen: string): void {
       })
     })
   })
-  const c = (t: DateTime, tz: string): string => t.setZone(tz).toFormat(dtFmt)
-  const locTZ = (t: DateTime): string => c(t, DateTime.local().zoneName)
-  const schedTZ = (t: DateTime): string => c(t, schedule.timeZone)
+  const schedTZ = (t: DateTime): string =>
+    t.setZone(schedule.timeZone).toFormat(dtFmt)
 
   it('should go back and forth between steps', () => {
     const { start, end } = randInterval()
-    cy.get('[data-cy="new-temp-sched"]').click()
+    cy.get('[data-cy="new-override"]').click()
+    cy.dialogTitle('Choose')
+    cy.dialogForm({ variant: 'temp' })
+    cy.dialogClick('Next')
     cy.get(schedTimesSelector).as('step1')
     cy.get(addShiftsSelector).as('step2')
     cy.get('@step1').should('be.visible.and.contain', 'STEP 1 OF 2')
     cy.get('[data-cy="loading-button"]').contains('Next').click() // should error
-    cy.dialogForm({ start: locTZ(start), end: locTZ(end) }, schedTimesSelector)
+    cy.dialogForm(
+      { start: schedTZ(start), end: schedTZ(end) },
+      schedTimesSelector,
+    )
     cy.get('[data-cy="loading-button"]').contains('Next').click()
     cy.get('@step2').should('be.visible.and.contain', 'STEP 2 OF 2')
     cy.dialogClick('Back')
@@ -46,63 +51,28 @@ function testTemporarySchedule(screen: string): void {
   it('should toggle duration field', () => {
     const { start, end } = randInterval()
     const shiftEnd = start.plus({ hours: 8 }) // default shift length is 8 hours
-    cy.get('[data-cy="new-temp-sched"]').click()
+    cy.get('[data-cy="new-override"]').click()
+    cy.dialogTitle('Choose')
+    cy.dialogForm({ variant: 'temp' })
+    cy.dialogClick('Next')
     cy.get(addShiftsSelector).as('step2')
-    cy.dialogForm({ start: locTZ(start), end: locTZ(end) }, schedTimesSelector)
+    cy.dialogForm(
+      { start: schedTZ(start), end: schedTZ(end) },
+      schedTimesSelector,
+    )
     cy.get('[data-cy="loading-button"]').contains('Next').click()
     cy.get('@step2').should('be.visible.and.contain', 'STEP 2 OF 2')
     cy.get('@step2').find('input[name="end"]').should('have.value', 8)
     cy.get('@step2').find('[data-cy="toggle-duration-off"]').click()
     cy.get('@step2')
       .find('input[name="end"]')
-      .should('have.value', locTZ(shiftEnd))
+      .should('have.value', schedTZ(shiftEnd))
     cy.dialogForm(
-      { end: locTZ(shiftEnd.plus({ hours: 4 })) },
+      { end: schedTZ(shiftEnd.plus({ hours: 4 })) },
       addShiftsSelector,
     )
     cy.get('@step2').find('[data-cy="toggle-duration-on"]').click()
     cy.get('@step2').find('input[name="end"]').should('have.value', 12)
-  })
-
-  it('should toggle timezone switches', () => {
-    const { start, end } = randInterval()
-
-    cy.get('[data-cy="new-temp-sched"]').click()
-    cy.get(schedTimesSelector).as('step1')
-    cy.get(addShiftsSelector).as('step2')
-    cy.dialogForm({ start: locTZ(start), end: locTZ(end) }, schedTimesSelector)
-    cy.get('@step1')
-      .find('input[name="start"]')
-      .should('have.value', locTZ(start))
-    cy.get('@step1').find('input[name="end"]').should('have.value', locTZ(end))
-    cy.get('@step1').find('[data-cy="tz-switch"]').click()
-    cy.get('@step1')
-      .find('input[name="start"]')
-      .should('have.value', schedTZ(start))
-    cy.get('@step1')
-      .find('input[name="end"]')
-      .should('have.value', schedTZ(end))
-    cy.get('[data-cy="loading-button"]').contains('Next').click()
-    cy.get('@step2').should('be.visible.and.contain', 'STEP 2 OF 2')
-    cy.get('@step2').find('[data-cy="toggle-duration-off"]').click()
-    cy.get('@step2')
-      .find('input[name="start"]')
-      .should('have.value', schedTZ(start))
-    cy.get('@step2')
-      .find('input[name="end"]')
-      .should('have.value', schedTZ(start.plus({ hours: 8 })))
-    cy.get('@step2').find('[data-cy="tz-switch"]').click()
-    cy.get('@step2')
-      .find('input[name="start"]')
-      .should('have.value', locTZ(start))
-    cy.get('@step2')
-      .find('input[name="end"]')
-      .should('have.value', locTZ(start.plus({ hours: 8 })))
-    cy.dialogClick('Back')
-    cy.get('@step1')
-      .find('input[name="start"]')
-      .should('have.value', locTZ(start))
-    cy.get('@step1').find('input[name="end"]').should('have.value', locTZ(end))
   })
 
   it("should add shift's info to form after deleting it from shift list", () => {
@@ -127,7 +97,10 @@ function testTemporarySchedule(screen: string): void {
 
   it('should cancel and close form', () => {
     cy.get('[role="dialog"]').should('not.exist')
-    cy.get('[data-cy="new-temp-sched"]').click()
+    cy.get('[data-cy="new-override"]').click()
+    cy.dialogTitle('Choose')
+    cy.dialogForm({ variant: 'temp' })
+    cy.dialogClick('Next')
     cy.get('[role="dialog"]').should('be.visible')
     cy.dialogFinish('Cancel')
     cy.get('[role="dialog"]').should('not.exist')
@@ -135,15 +108,24 @@ function testTemporarySchedule(screen: string): void {
 
   it('should create a temporary schedule', () => {
     const { start, end } = randInterval()
-    cy.get('[data-cy="new-temp-sched"]').click()
-    cy.dialogForm({ start: locTZ(start), end: locTZ(end) }, schedTimesSelector)
+    cy.get('[data-cy="new-override"]').click()
+    cy.dialogTitle('Choose')
+    cy.dialogForm({ variant: 'temp' })
+    cy.dialogClick('Next')
+    cy.dialogForm(
+      { start: schedTZ(start), end: schedTZ(end) },
+      schedTimesSelector,
+    )
     cy.get('[data-cy="loading-button"]').contains('Next').click()
     cy.get(addShiftsSelector).should('be.visible.and.contain', 'STEP 2 OF 2')
+    cy.get('[data-cy="no-coverage-checkbox"]').should('not.exist')
     cy.dialogForm({ userID: manualAddUser.name }, addShiftsSelector)
     cy.get('[data-cy="shifts-list"]').should('not.contain', manualAddUser.name)
-    cy.get('button[title="Add Shift"]').click()
+    cy.get('button[data-cy="add-shift"]').click()
     cy.get('[data-cy="shifts-list"]').should('contain', manualAddUser.name)
-    cy.dialogFinish('Submit')
+    cy.get('[data-cy="loading-button"]').contains('Submit').click()
+    cy.get('[data-cy="no-coverage-checkbox"]').should('be.visible').click()
+    cy.dialogFinish('Retry')
     cy.visit('/schedules/' + schedule.id + '?start=' + start.toISO())
     cy.get('div').contains('Temporary Schedule').click()
     cy.get('div[data-cy="shift-tooltip"]').should('be.visible')
@@ -178,7 +160,7 @@ function testTemporarySchedule(screen: string): void {
       cy.dialogForm(
         {
           userID: manualAddUser.name,
-          start: locTZ(now.plus({ hour: 1 })),
+          start: schedTZ(now.plus({ hour: 1 })),
         },
         addShiftsSelector,
       )
@@ -186,9 +168,11 @@ function testTemporarySchedule(screen: string): void {
         'not.contain',
         manualAddUser.name,
       )
-      cy.get('button[title="Add Shift"]').click()
+      cy.get('button[data-cy="add-shift"]').click()
       cy.get('[data-cy="shifts-list"]').should('contain', manualAddUser.name)
-      cy.dialogFinish('Submit')
+      cy.get('[data-cy="loading-button"]').contains('Submit').click()
+      cy.get('[data-cy="no-coverage-checkbox"]').should('be.visible').click()
+      cy.dialogFinish('Retry')
       cy.reload() // ensure calendar update
       cy.get('div').contains(manualAddUser.name).click()
       cy.get('div[data-cy="shift-tooltip"]').should('be.visible')
@@ -211,11 +195,14 @@ function testTemporarySchedule(screen: string): void {
 
   it('should be able to add multiple shifts on step 2', () => {
     const ivl = randInterval()
-    cy.get('[data-cy="new-temp-sched"]').click()
+    cy.get('[data-cy="new-override"]').click()
+    cy.dialogTitle('Choose')
+    cy.dialogForm({ variant: 'temp' })
+    cy.dialogClick('Next')
     cy.dialogForm(
       {
-        start: locTZ(ivl.start),
-        end: locTZ(ivl.end),
+        start: schedTZ(ivl.start),
+        end: schedTZ(ivl.end),
       },
       schedTimesSelector,
     )
@@ -224,13 +211,13 @@ function testTemporarySchedule(screen: string): void {
     cy.dialogForm(
       {
         userID: manualAddUser.name,
-        start: locTZ(ivl.start),
+        start: schedTZ(ivl.start),
         end: (ivl.toDuration().as('hours') / 3).toFixed(2),
       },
       addShiftsSelector,
     )
     cy.get('[data-cy="shifts-list"]').should('not.contain', manualAddUser.name)
-    cy.get('button[title="Add Shift"]').click()
+    cy.get('button[data-cy="add-shift"]').click()
     cy.get('[data-cy="shifts-list"]').should('contain', manualAddUser.name)
     cy.dialogForm(
       {
@@ -239,7 +226,7 @@ function testTemporarySchedule(screen: string): void {
       addShiftsSelector,
     )
     cy.get('[data-cy="shifts-list"]').should('not.contain', graphQLAddUser.name)
-    cy.get('button[title="Add Shift"]').click()
+    cy.get('button[data-cy="add-shift"]').click()
     cy.get('[data-cy="shifts-list"]').should('contain', graphQLAddUser.name)
     cy.get('[data-cy="shifts-list"]').should('contain', manualAddUser.name)
   })

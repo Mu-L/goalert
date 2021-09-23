@@ -1,36 +1,39 @@
 import React, { useEffect, useState } from 'react'
 import {
+  Button,
   DialogContentText,
-  Fab,
   Grid,
   Typography,
   makeStyles,
+  FormControlLabel,
+  Checkbox,
+  FormHelperText,
 } from '@material-ui/core'
-import { Add as AddIcon } from '@material-ui/icons'
+import ArrowRightAltIcon from '@material-ui/icons/ArrowRightAlt'
 import { contentText, Shift, StepContainer } from './sharedUtils'
 import { FormContainer } from '../../forms'
 import _ from 'lodash'
 import TempSchedShiftsList from './TempSchedShiftsList'
 import TempSchedAddShiftForm from './TempSchedAddShiftForm'
-import { ScheduleTZFilter } from '../ScheduleTZFilter'
 import { DateTime, Interval } from 'luxon'
 import { FieldError } from '../../util/errutil'
-import { isISOAfter } from '../../util/shifts'
+import { isISOAfter, parseInterval } from '../../util/shifts'
+import { Alert, AlertTitle } from '@material-ui/lab'
+import { useScheduleTZ } from './hooks'
+import { getCoverageGapItems } from './shiftsListUtil'
 
 const useStyles = makeStyles((theme) => ({
   contentText,
-  addButton: {
-    boxShadow: 'none',
-  },
-  addButtonContainer: {
-    display: 'flex',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
   avatar: {
     backgroundColor: theme.palette.primary.main,
   },
+  shiftsListContainer: {
+    height: '100%',
+    display: 'flex',
+    flexDirection: 'column',
+  },
   listOuterContainer: {
+    height: '100%',
     position: 'relative',
     overflowY: 'auto',
   },
@@ -43,6 +46,11 @@ const useStyles = makeStyles((theme) => ({
   },
   shiftFormContainer: {
     maxHeight: '100%',
+    paddingRight: '2rem',
+  },
+  noCoverageError: {
+    marginTop: '.5rem',
+    marginBottom: '.5rem',
   },
 }))
 
@@ -53,8 +61,11 @@ type AddShiftsStepProps = {
   end: string
 
   scheduleID: string
-  stepText: string
   edit?: boolean
+
+  coverageGapsAllowed?: boolean
+  setCoverageGapsAllowed: (isAllowed: boolean) => void
+  isShowingCoverageGapsWarning: boolean
 }
 
 type DTShift = {
@@ -106,16 +117,19 @@ function mergeShifts(_shifts: Shift[]): Shift[] {
 
 export default function TempSchedAddShiftsStep({
   scheduleID,
-  stepText,
   onChange,
   start,
   end,
   value,
   edit,
+  coverageGapsAllowed,
+  setCoverageGapsAllowed,
+  isShowingCoverageGapsWarning,
 }: AddShiftsStepProps): JSX.Element {
   const classes = useStyles()
   const [shift, setShift] = useState(null as Shift | null)
   const [submitted, setSubmitted] = useState(false)
+  const { zone, q } = useScheduleTZ(scheduleID)
 
   // set start equal to the temporary schedule's start
   // can't this do on mount since the step renderer puts everyone on the DOM at once
@@ -170,6 +184,12 @@ export default function TempSchedAddShiftsStep({
     setSubmitted(false)
   }
 
+  const hasCoverageGaps = (() => {
+    if (q.loading) return false
+    const schedInterval = parseInterval({ start: start, end: end }, zone)
+    return getCoverageGapItems(schedInterval, value, zone).length > 0
+  })()
+
   return (
     <StepContainer data-cy='add-shifts-step'>
       {/* main container for fields | button | shifts */}
@@ -177,14 +197,14 @@ export default function TempSchedAddShiftsStep({
         {/* title + fields container */}
         <Grid
           item
-          xs={5}
+          xs={6}
           container
           spacing={2}
           direction='column'
           className={classes.shiftFormContainer}
         >
           <Grid item>
-            <Typography variant='body2'>{stepText}</Typography>
+            {!edit && <Typography variant='body2'>STEP 2 OF 2</Typography>}
             <Typography variant='h6' component='h2'>
               Specify on-call shifts.
             </Typography>
@@ -192,53 +212,73 @@ export default function TempSchedAddShiftsStep({
           <Grid item>
             <DialogContentText className={classes.contentText}>
               The schedule will be exactly as configured here for the entire
-              duration (ignoring all rules/overrides).
+              duration (ignoring all assignments and overrides).
             </DialogContentText>
-          </Grid>
-          <Grid item>
-            <ScheduleTZFilter
-              label={(tz) => `Configure in ${tz}`}
-              scheduleID={scheduleID}
-            />
           </Grid>
           <FormContainer
             errors={fieldErrors()}
             value={shift}
             onChange={(val: Shift) => setShift(val)}
           >
-            <TempSchedAddShiftForm min={edit ? start : undefined} />
+            <TempSchedAddShiftForm
+              value={shift}
+              min={edit ? start : undefined}
+              scheduleID={scheduleID}
+            />
           </FormContainer>
-        </Grid>
-
-        {/* add button container */}
-        <Grid item xs={2} className={classes.addButtonContainer}>
-          <Fab
-            className={classes.addButton}
-            aria-label='Add Shift'
-            title='Add Shift'
-            onClick={handleAddShift}
-            size='medium'
-            color='primary'
-            type='button'
-          >
-            <AddIcon />
-          </Fab>
+          <Grid item>
+            <Button
+              data-cy='add-shift'
+              color='secondary'
+              variant='contained'
+              fullWidth
+              onClick={handleAddShift}
+              endIcon={<ArrowRightAltIcon />}
+            >
+              Add Shift
+            </Button>
+          </Grid>
         </Grid>
 
         {/* shifts list container */}
-        <Grid item xs={5} className={classes.listOuterContainer}>
-          <div className={classes.listInnerContainer}>
-            <TempSchedShiftsList
-              value={value}
-              start={start}
-              end={end}
-              onRemove={(shift: Shift) => {
-                setShift(shift)
-                onChange(value.filter((s) => !shiftEquals(shift, s)))
-              }}
-              edit={edit}
-            />
+        <Grid item xs={6} className={classes.shiftsListContainer}>
+          <div className={classes.listOuterContainer}>
+            <div className={classes.listInnerContainer}>
+              <TempSchedShiftsList
+                scheduleID={scheduleID}
+                value={value}
+                start={start}
+                end={end}
+                onRemove={(shift: Shift) => {
+                  setShift(shift)
+                  onChange(value.filter((s) => !shiftEquals(shift, s)))
+                }}
+                edit={edit}
+              />
+            </div>
           </div>
+          {isShowingCoverageGapsWarning && hasCoverageGaps && (
+            <Alert severity='error' className={classes.noCoverageError}>
+              <AlertTitle>Gaps in coverage</AlertTitle>
+              <FormHelperText>
+                There are gaps in coverage. During these gaps, nobody on the
+                schedule will receive alerts. If you still want to proceed,
+                check the box and retry.
+              </FormHelperText>
+              <FormControlLabel
+                label='Allow gaps in coverage'
+                labelPlacement='end'
+                control={
+                  <Checkbox
+                    data-cy='no-coverage-checkbox'
+                    checked={coverageGapsAllowed}
+                    onChange={(e) => setCoverageGapsAllowed(e.target.checked)}
+                    name='allowCoverageGaps'
+                  />
+                }
+              />
+            </Alert>
+          )}
         </Grid>
       </Grid>
     </StepContainer>
