@@ -31,7 +31,7 @@ require (
 	github.com/mailhog/storage v1.0.1
 	github.com/matcornic/hermes/v2 v2.1.0
 	github.com/mnako/letters v0.2.2
-	github.com/nyaruka/phonenumbers v1.3.5
+	github.com/nyaruka/phonenumbers v1.4.0
 	github.com/oauth2-proxy/mockoidc v0.0.0-20220308204021-b9169deeb282
 	github.com/pelletier/go-toml/v2 v2.2.2
 	github.com/pkg/errors v0.9.1
@@ -144,7 +144,7 @@ require (
 	github.com/xrash/smetrics v0.0.0-20240312152122-5f08fbb34913 // indirect
 	go.uber.org/atomic v1.9.0 // indirect
 	go.uber.org/multierr v1.9.0 // indirect
-	golang.org/x/exp v0.0.0-20231214170342-aacd6d4b4611 // indirect
+	golang.org/x/exp v0.0.0-20240525044651-4c93da0ed11d // indirect
 	golang.org/x/exp/typeparams v0.0.0-20230626212559-97b1e661b5df // indirect
 	golang.org/x/mod v0.18.0 // indirect
 	golang.org/x/net v0.26.0 // indirect
